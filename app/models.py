@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime
+from sqlalchemy import Column, String, Integer, Float, Date, DateTime
 from sqlalchemy.sql import func
 
 from app.database import Base
@@ -7,21 +7,114 @@ from app.database import Base
 class UserProfile(Base):
     __tablename__ = "user_profiles"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
 
-    user_id = Column(String, unique=True, nullable=False, index=True)
+    user_id = Column(
+        String,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
 
-    name = Column(String, nullable=False)
+    name = Column(
+        String,
+        nullable=False,
+    )
 
-    age = Column(Integer, nullable=True)
+    age = Column(
+        Integer,
+        nullable=True,
+    )
 
-    gender = Column(String, nullable=True)
+    date_of_birth = Column(
+        Date,
+        nullable=True,
+    )
 
-    height = Column(Float, nullable=True)
+    gender = Column(
+        String,
+        nullable=True,
+    )
 
-    weight = Column(Float, nullable=True)
+    phone = Column(
+        String,
+        nullable=True,
+    )
+
+    country_code = Column(
+        String,
+        nullable=True,
+    )
+
+    height = Column(
+        Float,
+        nullable=True,
+    )
+
+    weight = Column(
+        Float,
+        nullable=True,
+    )
+
+    profile_image = Column(
+        String,
+        nullable=True,
+    )
 
     created_at = Column(
         DateTime(timezone=True),
-        server_default=func.now()
+        server_default=func.now(),
+    )
+
+
+class UserAccount(Base):
+    __tablename__ = "user_accounts"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    user_id = Column(
+        String,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    name = Column(
+        String,
+        nullable=False,
+    )
+
+    email = Column(
+        String,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    phone = Column(
+        String,
+        nullable=True,
+    )
+
+    country_code = Column(
+        String,
+        nullable=True,
+    )
+
+    password_hash = Column(
+        String,
+        nullable=False,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
     )
