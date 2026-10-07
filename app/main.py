@@ -194,3 +194,53 @@ def create_user(
         "user_id": new_user.user_id,
         "name": new_user.name,
     }
+
+
+# ============================================================
+# GET USER PROFILE
+# ============================================================
+
+@app.get("/users/{user_id}")
+def get_user_profile(
+    user_id: str,
+    db: Session = Depends(get_db),
+):
+    existing_profile = (
+        db.query(UserProfile)
+        .filter(
+            UserProfile.user_id == user_id
+        )
+        .first()
+    )
+
+    # --------------------------------------------------------
+    # PROFILE DOES NOT EXIST
+    # --------------------------------------------------------
+
+    if not existing_profile:
+        return {
+            "exists": False,
+            "message": "User profile not found.",
+        }
+
+    # --------------------------------------------------------
+    # PROFILE EXISTS
+    # --------------------------------------------------------
+
+    return {
+        "exists": True,
+        "user_id": existing_profile.user_id,
+        "name": existing_profile.name,
+        "age": existing_profile.age,
+        "date_of_birth": (
+            existing_profile.date_of_birth.isoformat()
+            if existing_profile.date_of_birth
+            else None
+        ),
+        "gender": existing_profile.gender,
+        "phone": existing_profile.phone,
+        "country_code": existing_profile.country_code,
+        "height": existing_profile.height,
+        "weight": existing_profile.weight,
+        "profile_image": existing_profile.profile_image,
+    }
