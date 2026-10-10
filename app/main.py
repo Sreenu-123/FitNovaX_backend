@@ -231,11 +231,8 @@ def forgot_password(
     # CREATE RESET LINK
     # --------------------------------------------------------
 
-    reset_link = (
-        f"fitnovax://reset-password"
-        f"?token={reset_token}"
+    reset_link = (f"https://fitnovax.com/reset-password?token={reset_token}"
     )
-
     # --------------------------------------------------------
     # SEND RESET EMAIL
     # --------------------------------------------------------
