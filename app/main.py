@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import resend
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -15,22 +15,17 @@ from app.schemas import (
     ResetPasswordRequest,
     UserLogin,
     UserProfileCreate,
+    UserProfileUpdate,
     UserSignup,
 )
 
-
-app = FastAPI()
-
-
-# ============================================================
-# RESEND CONFIGURATION
-# ============================================================
+app = FastAPI(title="FitNovaX API")
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
 
 # ============================================================
-# PASSWORD HASHING
+# PASSWORD HELPERS
 # ============================================================
 
 def hash_password(password: str) -> str:
@@ -46,91 +41,118 @@ def hash_password(password: str) -> str:
     return f"{salt.hex()}:{password_hash.hex()}"
 
 
-# ============================================================
-# PASSWORD VERIFICATION
-# ============================================================
-
 def verify_password(
     password: str,
     stored_password: str,
 ) -> bool:
-    salt_hex, stored_hash_hex = stored_password.split(":")
+    try:
+        salt_hex, stored_hash_hex = stored_password.split(":")
+        salt = bytes.fromhex(salt_hex)
 
-    salt = bytes.fromhex(salt_hex)
+        password_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            100000,
+        )
 
-    password_hash = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        100000,
+        return secrets.compare_digest(
+            password_hash.hex(),
+            stored_hash_hex,
+        )
+    except (ValueError, TypeError):
+        return False
+
+
+def find_account(db: Session, user_id: str):
+    return (
+        db.query(UserAccount)
+        .filter(UserAccount.user_id == user_id)
+        .first()
     )
 
-    return password_hash.hex() == stored_hash_hex
+
+def profile_response(profile: UserProfile, email: str):
+    return {
+        "exists": True,
+        "user_id": profile.user_id,
+        "name": profile.name,
+        "email": email,
+        "age": profile.age,
+        "date_of_birth": (
+            profile.date_of_birth.isoformat()
+            if profile.date_of_birth
+            else None
+        ),
+        "gender": profile.gender,
+        "phone": profile.phone,
+        "country_code": profile.country_code,
+        "height": profile.height,
+        "weight": profile.weight,
+        "profile_image": profile.profile_image,
+    }
 
 
 # ============================================================
-# ROOT
+# ROOT AND HEALTH
 # ============================================================
 
 @app.get("/")
 def root():
-    return {
-        "message": "FitNovaX Backend is running"
-    }
+    return {"message": "FitNovaX Backend is running"}
 
-
-# ============================================================
-# HEALTH CHECK
-# ============================================================
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "ok"
-    }
+    return {"status": "ok"}
 
 
 # ============================================================
 # SIGN UP
 # ============================================================
 
-@app.post("/auth/signup", status_code=201)
+@app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
 def signup(
     user: UserSignup,
     db: Session = Depends(get_db),
 ):
+    email = user.email.lower().strip()
+
     existing_user = (
         db.query(UserAccount)
-        .filter(
-            UserAccount.email == user.email.lower().strip()
-        )
+        .filter(UserAccount.email == email)
         .first()
     )
 
     if existing_user:
-        return {
-            "message": "An account with this email already exists.",
-            "user_id": None,
-        }
-
-    new_user_id = str(uuid.uuid4())
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists.",
+        )
 
     new_user = UserAccount(
-        user_id=new_user_id,
-        name=user.name,
-        email=user.email.lower().strip(),
+        user_id=str(uuid.uuid4()),
+        name=user.name.strip(),
+        email=email,
         phone=user.phone,
         country_code=user.country_code,
         password_hash=hash_password(user.password),
     )
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    try:
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+    except Exception:
+        db.rollback()
+        raise
 
     return {
+        "success": True,
         "message": "Account created successfully.",
         "user_id": new_user.user_id,
+        "name": new_user.name,
+        "email": new_user.email,
     }
 
 
@@ -143,28 +165,25 @@ def login(
     user: UserLogin,
     db: Session = Depends(get_db),
 ):
+    email = user.email.lower().strip()
+
     existing_user = (
         db.query(UserAccount)
-        .filter(
-            UserAccount.email == user.email.lower().strip()
-        )
+        .filter(UserAccount.email == email)
         .first()
     )
 
-    if not existing_user:
-        return {
-            "success": False,
-            "message": "Invalid email or password.",
-        }
-
-    if not verify_password(
-        user.password,
-        existing_user.password_hash,
+    if (
+        not existing_user
+        or not verify_password(
+            user.password,
+            existing_user.password_hash,
+        )
     ):
-        return {
-            "success": False,
-            "message": "Invalid email or password.",
-        }
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+        )
 
     return {
         "success": True,
@@ -188,117 +207,60 @@ def forgot_password(
 
     existing_user = (
         db.query(UserAccount)
-        .filter(
-            UserAccount.email == email
-        )
+        .filter(UserAccount.email == email)
         .first()
     )
 
-    # --------------------------------------------------------
-    # ACCOUNT DOES NOT EXIST
-    # --------------------------------------------------------
-
     if not existing_user:
+        # Avoid revealing whether an email is registered.
         return {
-            "success": False,
-            "message": "No account found with this email.",
+            "success": True,
+            "message": "If the account exists, a reset email will be sent.",
         }
-
-    # --------------------------------------------------------
-    # GENERATE RESET TOKEN
-    # --------------------------------------------------------
 
     reset_token = secrets.token_urlsafe(32)
 
-    reset_token_expires_at = (
-        datetime.now(timezone.utc)
-        + timedelta(minutes=15)
-    )
-
-    # --------------------------------------------------------
-    # SAVE RESET TOKEN
-    # --------------------------------------------------------
-
     existing_user.reset_token = reset_token
     existing_user.reset_token_expires_at = (
-        reset_token_expires_at
+        datetime.now(timezone.utc) + timedelta(minutes=15)
     )
-
-    db.commit()
-    db.refresh(existing_user)
-
-    # --------------------------------------------------------
-    # CREATE RESET LINK
-    # --------------------------------------------------------
-
-    reset_link = (f"https://fitnovax.com/reset-password?token={reset_token}"
-    )
-    # --------------------------------------------------------
-    # SEND RESET EMAIL
-    # --------------------------------------------------------
 
     try:
-        resend.Emails.send(
-            {
-                "from": "onboarding@resend.dev",
-                "to": [existing_user.email],
-                "subject": "Reset your FitNovaX password",
-                "html": f"""
-                    <div style="font-family: Arial, sans-serif;">
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
-                        <h2>FitNovaX Password Reset</h2>
+    # Configure this URL to match the reset link your app supports.
+    reset_link = (
+        f"https://fitnovax.com/reset-password?token={reset_token}"
+    )
 
-                        <p>
-                            We received a request to reset your
-                            FitNovaX password.
-                        </p>
-
-                        <p>
-                            Click the button below to create
-                            a new password.
-                        </p>
-
-                        <p>
-                            <a
-                                href="{reset_link}"
-                                style="
-                                    display: inline-block;
-                                    padding: 12px 20px;
-                                    background-color: #2196F3;
-                                    color: white;
-                                    text-decoration: none;
-                                    border-radius: 6px;
-                                "
-                            >
-                                Reset Password
-                            </a>
-                        </p>
-
-                        <p>
-                            This link will expire in 15 minutes.
-                        </p>
-
-                        <p>
-                            If you did not request a password reset,
-                            you can safely ignore this email.
-                        </p>
-
-                    </div>
-                """,
-            }
-        )
-
-    except Exception as error:
-        print("RESEND ERROR:", error)
-
+    try:
+        resend.Emails.send({
+            "from": "onboarding@resend.dev",
+            "to": [existing_user.email],
+            "subject": "Reset your FitNovaX password",
+            "html": f"""
+                <div style="font-family: Arial, sans-serif;">
+                    <h2>FitNovaX Password Reset</h2>
+                    <p>Use the link below to reset your password.</p>
+                    <p>
+                        <a href="{reset_link}">
+                            Reset Password
+                        </a>
+                    </p>
+                    <p>This link expires in 15 minutes.</p>
+                </div>
+            """,
+        })
+    except Exception:
+        # Do not return the reset token to the client.
+        print("Failed to send password reset email.")
         return {
             "success": False,
             "message": "Failed to send password reset email.",
         }
-
-    # --------------------------------------------------------
-    # SUCCESS
-    # --------------------------------------------------------
 
     return {
         "success": True,
@@ -315,111 +277,48 @@ def reset_password(
     request: ResetPasswordRequest,
     db: Session = Depends(get_db),
 ):
-    # --------------------------------------------------------
-    # CLEAN TOKEN
-    # --------------------------------------------------------
-
     token = request.token.strip()
-
-    # --------------------------------------------------------
-    # FIND USER USING RESET TOKEN
-    # --------------------------------------------------------
 
     existing_user = (
         db.query(UserAccount)
-        .filter(
-            UserAccount.reset_token == token
-        )
+        .filter(UserAccount.reset_token == token)
         .first()
     )
 
-    # --------------------------------------------------------
-    # INVALID TOKEN
-    # --------------------------------------------------------
-
-    if not existing_user:
-        return {
-            "success": False,
-            "message": "Invalid or expired reset token.",
-        }
-
-    # --------------------------------------------------------
-    # CHECK TOKEN EXISTS
-    # --------------------------------------------------------
-
-    if not existing_user.reset_token:
-        return {
-            "success": False,
-            "message": "Invalid or expired reset token.",
-        }
-
-    # --------------------------------------------------------
-    # CHECK TOKEN EXPIRY
-    # --------------------------------------------------------
+    if not existing_user or not existing_user.reset_token_expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token.",
+        )
 
     expires_at = existing_user.reset_token_expires_at
 
-    if not expires_at:
-        return {
-            "success": False,
-            "message": "Invalid or expired reset token.",
-        }
-
-    # PostgreSQL can return timezone-aware or naive datetime
-    # depending on configuration, so normalize it safely.
-
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(
-            tzinfo=timezone.utc
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token.",
         )
 
-    current_time = datetime.now(timezone.utc)
-
-    if expires_at <= current_time:
-        return {
-            "success": False,
-            "message": "Invalid or expired reset token.",
-        }
-
-    # --------------------------------------------------------
-    # VALIDATE NEW PASSWORD
-    # --------------------------------------------------------
-
-    new_password = request.new_password.strip()
+    new_password = request.new_password
 
     if len(new_password) < 8:
-        return {
-            "success": False,
-            "message": "Password must be at least 8 characters long.",
-        }
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long.",
+        )
 
-    # --------------------------------------------------------
-    # HASH NEW PASSWORD
-    # --------------------------------------------------------
-
-    new_password_hash = hash_password(
-        new_password
-    )
-
-    # --------------------------------------------------------
-    # UPDATE PASSWORD
-    # --------------------------------------------------------
-
-    existing_user.password_hash = new_password_hash
-
-    # --------------------------------------------------------
-    # CLEAR RESET TOKEN
-    # --------------------------------------------------------
-
+    existing_user.password_hash = hash_password(new_password)
     existing_user.reset_token = None
     existing_user.reset_token_expires_at = None
 
-    db.commit()
-    db.refresh(existing_user)
-
-    # --------------------------------------------------------
-    # SUCCESS
-    # --------------------------------------------------------
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     return {
         "success": True,
@@ -428,35 +327,60 @@ def reset_password(
 
 
 # ============================================================
-# CREATE USER PROFILE
+# CREATE OR SAVE USER PROFILE
 # ============================================================
 
 @app.post("/users")
-def create_user(
+def create_user_profile(
     user: UserProfileCreate,
     db: Session = Depends(get_db),
 ):
-    new_user = UserProfile(
-        user_id=user.user_id,
-        name=user.name,
-        age=user.age,
-        date_of_birth=user.date_of_birth,
-        gender=user.gender,
-        phone=user.phone,
-        country_code=user.country_code,
-        height=user.height,
-        weight=user.weight,
-        profile_image=user.profile_image,
+    account = find_account(db, user.user_id)
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account not found.",
+        )
+
+    profile = (
+        db.query(UserProfile)
+        .filter(UserProfile.user_id == user.user_id)
+        .first()
     )
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    profile_data = user.model_dump(exclude={"user_id"})
+
+    if profile:
+        for field, value in profile_data.items():
+            setattr(profile, field, value)
+    else:
+        profile = UserProfile(
+            user_id=user.user_id,
+            **profile_data,
+        )
+        db.add(profile)
+
+    if user.name:
+        account.name = user.name
+
+    if user.phone is not None:
+        account.phone = user.phone
+
+    if user.country_code is not None:
+        account.country_code = user.country_code
+
+    try:
+        db.commit()
+        db.refresh(profile)
+    except Exception:
+        db.rollback()
+        raise
 
     return {
-        "message": "User profile created successfully",
-        "user_id": new_user.user_id,
-        "name": new_user.name,
+        "success": True,
+        "message": "User profile saved successfully.",
+        "user_id": profile.user_id,
     }
 
 
@@ -469,42 +393,95 @@ def get_user_profile(
     user_id: str,
     db: Session = Depends(get_db),
 ):
-    existing_profile = (
-        db.query(UserProfile)
-        .filter(
-            UserProfile.user_id == user_id
+    account = find_account(db, user_id)
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account not found.",
         )
+
+    profile = (
+        db.query(UserProfile)
+        .filter(UserProfile.user_id == user_id)
         .first()
     )
 
-    # --------------------------------------------------------
-    # PROFILE DOES NOT EXIST
-    # --------------------------------------------------------
-
-    if not existing_profile:
+    if not profile:
         return {
             "exists": False,
-            "message": "User profile not found.",
+            "user_id": account.user_id,
+            "name": account.name,
+            "email": account.email,
+            "age": None,
+            "date_of_birth": None,
+            "gender": None,
+            "phone": account.phone,
+            "country_code": account.country_code,
+            "height": None,
+            "weight": None,
+            "profile_image": None,
+            "message": "Profile details have not been saved yet.",
         }
 
-    # --------------------------------------------------------
-    # PROFILE EXISTS
-    # --------------------------------------------------------
+    return profile_response(profile, account.email)
+
+
+# ============================================================
+# UPDATE USER PROFILE
+# ============================================================
+
+@app.put("/users/{user_id}")
+def update_user_profile(
+    user_id: str,
+    user: UserProfileUpdate,
+    db: Session = Depends(get_db),
+):
+    account = find_account(db, user_id)
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account not found.",
+        )
+
+    profile = (
+        db.query(UserProfile)
+        .filter(UserProfile.user_id == user_id)
+        .first()
+    )
+
+    if not profile:
+        profile = UserProfile(
+            user_id=user_id,
+            name=account.name,
+        )
+        db.add(profile)
+
+    update_data = user.model_dump(exclude_unset=True)
+
+    for field, value in update_data.items():
+        setattr(profile, field, value)
+
+    if "name" in update_data and update_data["name"] is not None:
+        account.name = update_data["name"]
+
+    if "phone" in update_data:
+        account.phone = update_data["phone"]
+
+    if "country_code" in update_data:
+        account.country_code = update_data["country_code"]
+
+    try:
+        db.commit()
+        db.refresh(profile)
+    except Exception:
+        db.rollback()
+        raise
 
     return {
-        "exists": True,
-        "user_id": existing_profile.user_id,
-        "name": existing_profile.name,
-        "age": existing_profile.age,
-        "date_of_birth": (
-            existing_profile.date_of_birth.isoformat()
-            if existing_profile.date_of_birth
-            else None
-        ),
-        "gender": existing_profile.gender,
-        "phone": existing_profile.phone,
-        "country_code": existing_profile.country_code,
-        "height": existing_profile.height,
-        "weight": existing_profile.weight,
-        "profile_image": existing_profile.profile_image,
+        "success": True,
+        "message": "User profile updated successfully.",
+        "user_id": profile.user_id,
+        "name": profile.name,
     }
